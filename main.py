@@ -1,12 +1,10 @@
+from fastapi import FastAPI
+from pydantic import BaseModel, Field
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from sklearn.datasets import load_iris
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
 import joblib
 
-
+# The model definition must match the training definition.
 class IrisNet(nn.Module):
     def __init__(self):
         super().__init__()
@@ -19,50 +17,47 @@ class IrisNet(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+# Enforces strict types for request and provides examples for FastAPI documentation. 
+app = FastAPI(title="FastAPI + PyTorch Iris Predictor")
 
-def main():
-    iris = load_iris()
-    X = iris.data
-    y = iris.target
+# Load scaler and model once at startup
+scaler = joblib.load("iris_scaler.joblib")
 
-    X_train, X_val, y_train, y_val = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
+model = IrisNet()
+model.load_state_dict(torch.load("iris_model.pth", map_location="cpu"))
+model.eval()
 
-    scaler = StandardScaler()
-    X_train = scaler.fit_transform(X_train)
-    X_val = scaler.transform(X_val)
+class_names = ["setosa", "versicolor", "virginica"]
 
-    X_train_t = torch.tensor(X_train, dtype=torch.float32)
-    y_train_t = torch.tensor(y_train, dtype=torch.long)
-    X_val_t = torch.tensor(X_val, dtype=torch.float32)
-    y_val_t = torch.tensor(y_val, dtype=torch.long)
+class IrisRequest(BaseModel):
+    sepal_length: float = Field(..., example=5.1)
+    sepal_width: float = Field(..., example=3.5)
+    petal_length: float = Field(..., example=1.4)
+    petal_width: float = Field(..., example=0.2)
 
-    model = IrisNet()
-    optimizer = optim.Adam(model.parameters(), lr=0.01)
-    loss_fn = nn.CrossEntropyLoss()
+@app.get("/")
+def root():
+    return {"status": "ok", "message": "Go to /docs to try the predictor."}
 
-    for epoch in range(1, 201):
-        model.train()
-        logits = model(X_train_t)
-        loss = loss_fn(logits, y_train_t)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+@app.post("/predict")
+def predict(req: IrisRequest):
+    # Convert request to model input
+    x = [[req.sepal_length, req.sepal_width, req.petal_length, req.petal_width]]
+    x_scaled = scaler.transform(x)
+    x_t = torch.tensor(x_scaled, dtype=torch.float32)
 
-        if epoch % 50 == 0:
-            model.eval()
-            with torch.no_grad():
-                val_logits = model(X_val_t)
-                val_pred = torch.argmax(val_logits, dim=1)
-                acc = (val_pred == y_val_t).float().mean().item()
-            print(f"Epoch {epoch:3d} | loss {loss.item():.4f} | val acc {acc * 100:.1f}%")
+    # Run model
+    with torch.no_grad():
+        logits = model(x_t)
+        probs = torch.softmax(logits, dim=1).numpy()[0]
+        pred_idx = int(torch.argmax(logits, dim=1).item())
 
-    # Save model weights + scaler
-    torch.save(model.state_dict(), "iris_model.pth")
-    joblib.dump(scaler, "iris_scaler.joblib")
-    print("Saved iris_model.pth and iris_scaler.joblib")
+    # Return JSON response
+    return {
+        "predicted_class": class_names[pred_idx],
+        "class_index": pred_idx,
+        "probabilities": {
+            class_names[i]: float(probs[i]) for i in range(len(class_names))
+        },
+    }
 
-
-if __name__ == "__main__":
-    main()
